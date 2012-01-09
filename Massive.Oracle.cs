@@ -5,6 +5,7 @@ using System.Configuration;
 using System.Data;
 using System.Data.Common;
 using System.Dynamic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 
@@ -26,15 +27,18 @@ namespace Massive {
             p.ParameterName = string.Format(":{0}", cmd.Parameters.Count);
             if (item == null) {
                 p.Value = DBNull.Value;
-            } else {
+            }
+            else {
                 if (item.GetType() == typeof(Guid)) {
                     p.Value = item.ToString();
                     p.DbType = DbType.String;
                     p.Size = 4000;
-                } else if (item.GetType() == typeof(ExpandoObject)) {
+                }
+                else if (item.GetType() == typeof(ExpandoObject)) {
                     var d = (IDictionary<string, object>)item;
                     p.Value = d.Values.FirstOrDefault();
-                } else {
+                }
+                else {
                     p.Value = item;
                 }
                 if (item.GetType() == typeof(string))
@@ -42,21 +46,13 @@ namespace Massive {
             }
             cmd.Parameters.Add(p);
         }
-        /// <summary>
-        /// Turns an IDataReader to a Dynamic list of things
-        /// </summary>
-        public static List<dynamic> ToExpandoList(this IDataReader rdr) {
-            var result = new List<dynamic>();
-            while (rdr.Read()) {
-                result.Add(rdr.RecordToExpando());
-            }
-            return result;
-        }
-        public static dynamic RecordToExpando(this IDataReader rdr) {
+
+        public static dynamic RecordToExpando(this IDataReader rdr, bool cleanColumnName) {
             dynamic e = new ExpandoObject();
             var d = e as IDictionary<string, object>;
             for (int i = 0; i < rdr.FieldCount; i++)
-                d.Add(rdr.GetName(i), DBNull.Value.Equals(rdr[i]) ? null : rdr[i]);
+                d.Add(cleanColumnName ? rdr.GetName(i).ToCleanColumnName() : rdr.GetName(i),
+                      DBNull.Value.Equals(rdr[i]) ? null : rdr[i]);
             return e;
         }
         /// <summary>
@@ -69,7 +65,8 @@ namespace Massive {
             if (o.GetType() == typeof(NameValueCollection) || o.GetType().IsSubclassOf(typeof(NameValueCollection))) {
                 var nv = (NameValueCollection)o;
                 nv.Cast<string>().Select(key => new KeyValuePair<string, object>(key, nv[key])).ToList().ForEach(i => d.Add(i));
-            } else {
+            }
+            else {
                 var props = o.GetType().GetProperties();
                 foreach (var item in props) {
                     d.Add(item.Name, item.GetValue(o, null));
@@ -86,6 +83,40 @@ namespace Massive {
         }
     }
 
+    public static class StringExtensions {
+        /// <summary>
+        /// Cleans up oracle style database column removing _ and SHOUTING
+        /// </summary>
+        /// <param name="columnName">The column name to clean</param>
+        /// <returns>Cleaned column name</returns>
+        public static string ToCleanColumnName(this string columnName) {
+            var output = columnName.Replace("_", " ");
+            var textInfo = new CultureInfo("en-GB", false).TextInfo;
+            return textInfo.ToTitleCase(output.ToLower()).Replace(" ", "");
+        }
+
+        /// <summary>
+        /// Return column name to its dirty dirty oracle format
+        /// </summary>
+        /// <param name="columnName">The clean column name to redirty</param>
+        /// <returns>the now dirty column name</returns>
+        public static string ToDirtyColumnName(this string columnName) {
+            var output = string.Empty;
+            var chars = columnName.ToCharArray();
+            var count = 0;
+            chars.ForEach(c => {
+                                  count++;
+                                  output += (char.IsUpper(c) && count != 1 ? "_" : string.Empty) + c;
+                              });
+            return output;
+        }
+
+        public static IEnumerable<T> ForEach<T>(this IEnumerable<T> collection, Action<T> action) {
+            foreach (var item in collection) action(item);
+            return collection;
+        }
+    }
+
     /// <summary>
     /// Convenience class for opening/executing data
     /// </summary>
@@ -99,32 +130,33 @@ namespace Massive {
             }
         }
     }
-    
+
     /// <summary>
     /// A class that wraps your database table in Dynamic Funtime
     /// </summary>
     public class DynamicModel : DynamicObject {
+        private readonly bool _cleanColumnName;
         DbProviderFactory _factory;
-        string ConnectionString;
+        string _connectionString;
         string _sequence;
 
-        public static DynamicModel Open(string connectionStringName)
-        {
+        public static DynamicModel Open(string connectionStringName) {
             dynamic dm = new DynamicModel(connectionStringName);
             return dm;
         }
 
         public DynamicModel(string connectionStringName, string tableName = "",
-            string primaryKeyField = "", string descriptorField = "", string sequence = "") {
+            string primaryKeyField = "", string descriptorField = "", string sequence = "", bool cleanColumnName = true) {
+            _cleanColumnName = cleanColumnName;
             TableName = tableName == "" ? this.GetType().Name : tableName;
             PrimaryKeyField = string.IsNullOrEmpty(primaryKeyField) ? "ID" : primaryKeyField;
             DescriptorField = descriptorField;
             _sequence = sequence == "" ? ConfigurationManager.AppSettings["default_seq"] : sequence;
             _factory = DbProviderFactories.GetFactory("System.Data.OracleClient");
             if (ConfigurationManager.ConnectionStrings[connectionStringName] == null)
-                ConnectionString = connectionStringName;
+                _connectionString = connectionStringName;
             else
-                ConnectionString = ConfigurationManager.ConnectionStrings[connectionStringName].ConnectionString;
+                _connectionString = ConfigurationManager.ConnectionStrings[connectionStringName].ConnectionString;
         }
 
         /// <summary>
@@ -153,11 +185,14 @@ namespace Massive {
             string def = column.COLUMN_DEFAULT;
             if (String.IsNullOrEmpty(def)) {
                 result = null;
-            } else if (def == "getdate()" || def == "(getdate())") {
+            }
+            else if (def == "getdate()" || def == "(getdate())") {
                 result = DateTime.Now.ToShortDateString();
-            } else if (def == "newid()") {
+            }
+            else if (def == "newid()") {
                 result = Guid.NewGuid().ToString();
-            } else {
+            }
+            else {
                 result = def.Replace("(", "").Replace(")", "");
             }
             return result;
@@ -197,14 +232,14 @@ namespace Massive {
             using (var conn = OpenConnection()) {
                 var rdr = CreateCommand(sql, conn, args).ExecuteReader();
                 while (rdr.Read()) {
-                    yield return rdr.RecordToExpando(); ;
+                    yield return rdr.RecordToExpando(_cleanColumnName); ;
                 }
             }
         }
         public virtual IEnumerable<dynamic> Query(string sql, DbConnection connection, params object[] args) {
             using (var rdr = CreateCommand(sql, connection, args).ExecuteReader()) {
                 while (rdr.Read()) {
-                    yield return rdr.RecordToExpando(); ;
+                    yield return rdr.RecordToExpando(_cleanColumnName); ;
                 }
             }
         }
@@ -234,7 +269,7 @@ namespace Massive {
         /// </summary>
         public virtual DbConnection OpenConnection() {
             var result = _factory.CreateConnection();
-            result.ConnectionString = ConnectionString;
+            result.ConnectionString = _connectionString;
             result.Open();
             return result;
         }
@@ -248,7 +283,8 @@ namespace Massive {
             foreach (var item in things) {
                 if (HasPrimaryKey(item)) {
                     commands.Add(CreateUpdateCommand(item, GetPrimaryKey(item)));
-                } else {
+                }
+                else {
                     commands.Add(CreateInsertCommand(item));
                 }
             }
@@ -413,7 +449,8 @@ namespace Massive {
                 var vals = sbVals.ToString().Substring(0, sbVals.Length - 1);
                 var sql = string.Format(stub, TableName, keys, vals);
                 result.CommandText = sql;
-            } else throw new InvalidOperationException("Can't parse this object to the database - there are no properties set");
+            }
+            else throw new InvalidOperationException("Can't parse this object to the database - there are no properties set");
             return result;
         }
         /// <summary>
@@ -422,8 +459,7 @@ namespace Massive {
         public virtual DbCommand CreateUpdateCommand(dynamic expando, object key) {
             var settings = (IDictionary<string, object>)expando;
             var sbKeys = new StringBuilder();
-            var stub = "UPDATE {0} SET {1} WHERE {2} = :{3}";
-            var args = new List<object>();
+            const string stub = "UPDATE {0} SET {1} WHERE {2} = :{3}";
             var result = CreateCommand(stub, null);
             int counter = 0;
             foreach (var item in settings) {
@@ -440,7 +476,8 @@ namespace Massive {
                 //strip the last commas
                 var keys = sbKeys.ToString().Substring(0, sbKeys.Length - 4);
                 result.CommandText = string.Format(stub, TableName, keys, PrimaryKeyField, counter);
-            } else throw new InvalidOperationException("No parsable object was sent in - could not divine any name/value pairs");
+            }
+            else throw new InvalidOperationException("No parsable object was sent in - could not divine any name/value pairs");
             return result;
         }
         /// <summary>
@@ -451,7 +488,8 @@ namespace Massive {
             if (key != null) {
                 sql += string.Format("WHERE {0}=:0", PrimaryKeyField);
                 args = new object[] { key };
-            } else if (!string.IsNullOrEmpty(where)) {
+            }
+            else if (!string.IsNullOrEmpty(where)) {
                 sql += where.Trim().StartsWith("where", StringComparison.OrdinalIgnoreCase) ? where : "WHERE " + where;
             }
             return CreateCommand(sql, null, args);
@@ -479,15 +517,15 @@ namespace Massive {
                     var cmd = CreateInsertCommand(ex);
                     cmd.Connection = conn;
                     cmd.ExecuteNonQuery();
-                    if (_sequence != "")
-                    {
+                    if (_sequence != "") {
                         cmd.CommandText = "SELECT " + _sequence + ".NEXTVAL as newID FROM DUAL";
                         ex.ID = cmd.ExecuteScalar();
                     }
                     Inserted(ex);
                 }
                 return ex;
-            } else {
+            }
+            else {
                 return null;
             }
         }
@@ -563,8 +601,8 @@ namespace Massive {
         public int Count() {
             return Count(TableName);
         }
-        public int Count(string tableName, string where="") {
-            return (int)Scalar("SELECT COUNT(*) FROM " + tableName+" "+where);
+        public int Count(string tableName, string where = "") {
+            return (int)Scalar("SELECT COUNT(*) FROM " + tableName + " " + where);
         }
 
         /// <summary>
@@ -591,16 +629,19 @@ namespace Massive {
             if (info.ArgumentNames.Count > 0) {
 
                 for (int i = 0; i < args.Length; i++) {
+                    var originalArgumentName = info.ArgumentNames[i];
                     var name = info.ArgumentNames[i].ToLower();
                     switch (name) {
                         case "orderby":
-                            orderBy = " ORDER BY " + args[i];
+                            orderBy = (_cleanColumnName ? " ORDER BY " + args[i].ToString().ToDirtyColumnName() : " ORDER BY " + args[i]);
                             break;
                         case "columns":
-                            columns = args[i].ToString();
+                            columns = (_cleanColumnName ? args[i].ToString().ToDirtyColumnName() : args[i].ToString());
                             break;
                         default:
-                            constraints.Add(string.Format(" {0} = :{1}", name, counter));
+                            constraints.Add(_cleanColumnName
+                                                ? string.Format(" {0} = :{1}", originalArgumentName.ToDirtyColumnName(), counter)
+                                                : string.Format(" {0} = :{1}", name, counter));
                             whereArgs.Add(args[i]);
                             counter++;
                             break;
@@ -615,15 +656,20 @@ namespace Massive {
             //probably a bit much here but... yeah this whole thing needs to be refactored...
             if (op.ToLower() == "count") {
                 result = Scalar("SELECT COUNT(*) FROM " + TableName + where, whereArgs.ToArray());
-            } else if (op.ToLower() == "sum") {
+            }
+            else if (op.ToLower() == "sum") {
                 result = Scalar("SELECT SUM(" + columns + ") FROM " + TableName + where, whereArgs.ToArray());
-            } else if (op.ToLower() == "max") {
+            }
+            else if (op.ToLower() == "max") {
                 result = Scalar("SELECT MAX(" + columns + ") FROM " + TableName + where, whereArgs.ToArray());
-            } else if (op.ToLower() == "min") {
+            }
+            else if (op.ToLower() == "min") {
                 result = Scalar("SELECT MIN(" + columns + ") FROM " + TableName + where, whereArgs.ToArray());
-            } else if (op.ToLower() == "avg") {
+            }
+            else if (op.ToLower() == "avg") {
                 result = Scalar("SELECT AVG(" + columns + ") FROM " + TableName + where, whereArgs.ToArray());
-            } else {
+            }
+            else {
 
                 //build the SQL
                 var justOne = op.StartsWith("First") || op.StartsWith("Last") || op.StartsWith("Get") || op.StartsWith("Single");
@@ -632,7 +678,8 @@ namespace Massive {
                 if (op.StartsWith("Last")) {
                     sql = "SELECT " + columns + " FROM " + TableName + where + (string.IsNullOrEmpty(where) ? "" : " AND ") + " ROWNUM=1 ";
                     orderBy = orderBy + " DESC ";
-                } else {
+                }
+                else {
                     //default to multiple
                     sql = "SELECT " + columns + " FROM " + TableName + where;
                 }
@@ -640,7 +687,8 @@ namespace Massive {
                 if (justOne) {
                     //return a single record
                     result = Query(sql + orderBy, whereArgs.ToArray()).FirstOrDefault();
-                } else {
+                }
+                else {
                     //return lots
                     result = Query(sql + orderBy, whereArgs.ToArray());
                 }
