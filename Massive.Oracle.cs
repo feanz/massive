@@ -291,7 +291,6 @@ namespace Massive {
             return commands;
         }
 
-
         public virtual int Execute(DbCommand command) {
             return Execute(new DbCommand[] { command });
         }
@@ -435,12 +434,12 @@ namespace Massive {
             var settings = (IDictionary<string, object>)expando;
             var sbKeys = new StringBuilder();
             var sbVals = new StringBuilder();
-            var stub = "INSERT INTO {0} ({1}) \r\n VALUES ({2})";
+            const string stub = "INSERT INTO {0} ({1}) \r\n VALUES ({2})";
             result = CreateCommand(stub, null);
             int counter = 0;
             foreach (var item in settings) {
-                sbKeys.AppendFormat("{0},", item.Key);
-                sbVals.AppendFormat(":{0},", counter.ToString());
+                sbKeys.AppendFormat("{0},", _cleanColumnName ? item.Key.ToDirtyColumnName() : item.Key);
+                sbVals.AppendFormat(":{0},", counter.ToString(CultureInfo.InvariantCulture));
                 result.AddParam(item.Value);
                 counter++;
             }
@@ -466,7 +465,8 @@ namespace Massive {
                 var val = item.Value;
                 if (!item.Key.Equals(PrimaryKeyField, StringComparison.OrdinalIgnoreCase) && item.Value != null) {
                     result.AddParam(val);
-                    sbKeys.AppendFormat("{0} = :{1}, \r\n", item.Key, counter.ToString());
+                    sbKeys.AppendFormat("{0} = :{1}, \r\n", _cleanColumnName ? item.Key.ToDirtyColumnName() : item.Key,
+                                        counter.ToString(CultureInfo.InvariantCulture));
                     counter++;
                 }
             }
@@ -517,7 +517,7 @@ namespace Massive {
                     var cmd = CreateInsertCommand(ex);
                     cmd.Connection = conn;
                     cmd.ExecuteNonQuery();
-                    if (_sequence != "") {
+                    if (_sequence != string.Empty) {
                         cmd.CommandText = "SELECT " + _sequence + ".NEXTVAL as newID FROM DUAL";
                         ex.ID = cmd.ExecuteScalar();
                     }
@@ -525,9 +525,7 @@ namespace Massive {
                 }
                 return ex;
             }
-            else {
-                return null;
-            }
+            return null;
         }
         /// <summary>
         /// Updates a record in the database. You can pass in an Anonymous object, an ExpandoObject,
@@ -549,7 +547,7 @@ namespace Massive {
         /// Removes one or more records from the DB according to the passed-in WHERE
         /// </summary>
         public int Delete(object key = null, string where = "", params object[] args) {
-            var deleted = this.Single(key);
+            var deleted = Single(key);
             var result = 0;
             if (BeforeDelete(deleted)) {
                 result = Execute(CreateDeleteCommand(where: where, key: key, args: args));
@@ -583,7 +581,7 @@ namespace Massive {
         //fun methods
         public virtual void ValidatesNumericalityOf(object value, string message = "Should be a number") {
             var type = value.GetType().Name;
-            var numerics = new string[] { "Int32", "Int16", "Int64", "Decimal", "Double", "Single", "Float" };
+            var numerics = new[] { "Int32", "Int16", "Int64", "Decimal", "Double", "Single", "Float" };
             if (!numerics.Contains(type)) {
                 Errors.Add(message);
             }
@@ -620,9 +618,9 @@ namespace Massive {
             //first should be "FindBy, Last, Single, First"
             var op = binder.Name;
             var columns = " * ";
-            string orderBy = string.Format(" ORDER BY {0}", PrimaryKeyField);
-            string sql = "";
-            string where = "";
+            var orderBy = string.Format(" ORDER BY {0}", PrimaryKeyField);
+            var sql = string.Empty;
+            var where = string.Empty;
             var whereArgs = new List<object>();
 
             //loop the named args - see if we have order, columns and constraints
